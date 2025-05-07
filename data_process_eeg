@@ -1,0 +1,106 @@
+import os
+import matplotlib.pyplot as plt
+import mne
+import numpy as np
+from scipy import io
+
+data_path = r"G:\dataset2017-29people\EEG"
+cnt_files = ['subject '+str(j).zfill(2)+'\\' + 'with occular artifact' +'\\'+'cnt.mat' for j in range(1,30)]
+mrk_files = ['subject '+str(j).zfill(2)+'\\' + 'with occular artifact' +'\\'+'mrk.mat' for j in range(1,30)]
+
+save_path = r"G:\dataset2017-29people\py_raw\eeg_8_30filter"   #数据保存路径
+
+if not os.path.exists(save_path):
+    os.makedirs(save_path)      #如果路径不存在则创建
+
+#--------------------cnt------------------
+sub = 1
+for cnt_file,mrk_file in zip(cnt_files,mrk_files):
+    cnt = io.loadmat(os.path.join(data_path,cnt_file))
+    # cnt = io.loadmat(r'G:\dataset2017-29people\EEG\subject 01\with occular artifact\cnt.mat')
+    cnt_data = cnt['cnt']
+    # 获得原始脑电数据 ch*time 例：32*360523
+    data1 = cnt_data[0,0]['x']
+    data2 = cnt_data[0,2]['x']
+    data3 = cnt_data[0,4]['x']
+    raw_data = np.concatenate([data1[0][0],data2[0][0],data3[0][0]],axis=0)
+    raw_data = np.transpose(raw_data,(1,0))
+    print(raw_data)
+    # print(raw_data.shape)
+    t1 = len(data1[0][0]); t2 = len(data1[0][0]) + len(data2[0][0])
+    #获得通道信息和采样频率
+    clab = cnt_data[0,0][0,0]['clab']
+    clab = clab.tolist()
+    clab = clab[0]
+    ch_names = []
+    for i in range(32):
+        ch_names.append(clab[i][0])
+    ch_types = ["eeg"] * 30 + ["eog"] * 2
+    # fs = cnt_data[0,0][0,0]['fs'][0][0]
+    # fs = float(fs)
+    print(ch_names)
+    # print(ch_types)
+    # print(type(fs))
+    #----------------event-----------------
+    # mrk = io.loadmat(r"G:\dataset2017-29people\EEG\subject 01\with occular artifact\mrk.mat")
+    mrk = io.loadmat(os.path.join(data_path,mrk_file))
+    mrk_data = mrk['mrk']
+    time1 = mrk_data[0,0]['time'];time2 = mrk_data[0,2]['time'];time3 = mrk_data[0,4]['time']
+    time2[0][0]=time2[0][0] + t1*5 ; time3[0][0] = time3[0][0] + t2*5
+    time = np.concatenate([time1[0][0],time2[0][0],time3[0][0]],axis=1)[0].tolist()
+    # print(time)
+    event1 = mrk_data[0,0]['event'][0,0]['desc'];event2 = mrk_data[0,2]['event'][0,0]['desc'];event3 = mrk_data[0,4]['event'][0,0]['desc']
+    event = np.concatenate([event1[0][0],event2[0][0],event3[0][0]],axis=0).tolist()
+    # print(event)
+    events = [[[]for i in range(3)]for i in range(60)]
+    for i in range(60):
+        events[i][0] = time[i]//5
+        events[i][1] = 0
+        events[i][2] = event[i][0]
+    events = np.array(events)
+    # print(events)
+    fs = 200
+    info = mne.create_info(ch_names=ch_names,ch_types=ch_types,sfreq=fs) #创建信号的信息
+    raw = mne.io.RawArray(raw_data, info)
+    montage=mne.channels.make_standard_montage('standard_1005')
+    info.set_montage(montage, on_missing='ignore')
+    raw.set_montage(montage)
+    # fig=mne.viz.plot_montage(info,show_names=True)
+    # raw.plot_sensors(show_names=True)
+    # plt.show()
+    raw.info['bads'] += ['VEOG','HEOG']   #确定需要剔除的坏通道
+    picks = mne.pick_types(raw.info, eeg=True, exclude='bads')
+    # # 重参考
+    raw_avg_ref = raw.copy().set_eeg_reference(ref_channels="average")
+    # # raw_avg_ref.plot(scalings='auto')
+    # # 滤波
+    raw_filter = raw_avg_ref.copy().filter(8, 30, method='iir')
+    #
+    event_id = dict(LMI=16, RMI=32)
+    epochs=mne.Epochs(raw=raw_filter,events=events,event_id=event_id,preload=True,proj=True,picks=picks,
+                      tmax=10,tmin=-2,baseline=(-2,0))
+    data = epochs.get_data() # [n_epochs, n_channels, n_times]
+    data = data[:,:,400:-1] #(60,30,2000)
+    # print(data.shape)
+    # print(epochs)
+    # epochs.plot(scalings='auto')
+    # plt.show()
+
+    # true_labels = events[:, -1]//event_id['LMI']
+    # print(true_labels)
+    np.save(os.path.join(save_path, str(sub) + '_data.npy'), data)
+    # np.save(os.path.join(save_path, str(sub) + '_label.npy'), true_labels)
+    print('sub{} saved'.format(sub))
+
+    # epochs.save("subject1-epo.fif",overwrite=True)
+    # raw.save("subject1-raw.fif",overwrite=True)
+    # np.save("subject1-eve",events)
+    # epochs.plot(scalings='auto')
+    # plt.show()
+    # raw = raw.filter(l_freq=4,h_freq=30)
+    # raw.plot()
+    # ica = mne.preprocessing.ICA(n_components=20,random_state=97,max_iter=800)
+    # ica.fit(raw)
+    # ica.plot_properties(raw)
+
+    sub = sub + 1
