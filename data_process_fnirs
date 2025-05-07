@@ -1,0 +1,112 @@
+from scipy import io
+import os
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+
+data_path = r"G:\dataset2017-29people\NIRS"
+cnt_files = ['subject '+str(j).zfill(2)+'\\' +'cnt.mat' for j in range(1,30)]
+mrk_files = ['subject '+str(j).zfill(2)+'\\' +'mrk.mat' for j in range(1,30)]
+# mnt_files = ['subject '+str(j).zfill(2)+'\\' +'mnt.mat' for j in range(1,30)]
+
+converteddata_path = r"G:\dataset2017-29people\py_raw\fnirs_MBLLconverted"
+oxy_files = [str(j) +'_oxy.mat' for j in range(1,30)]
+deoxy_files = [str(j) +'_deoxy.mat' for j in range(1,30)]
+
+save_path = r"G:\dataset2017-29people\py_raw\fnirs_5_15s_epoch"   #数据保存路径
+
+if not os.path.exists(save_path):
+    os.makedirs(save_path)      #如果路径不存在则创建
+
+#获得通道信息
+mnt = io.loadmat(r'G:\dataset2017-29people\NIRS\subject 01\mnt.mat')
+mnt = mnt['mnt']
+clab = mnt[0]['clab'][0][0]
+clab = clab.tolist()
+ch_names = []
+for i in range(36):
+    ch_names.append(clab[i][0])
+print(ch_names)
+fs = 10
+
+sub = 1
+for cnt_file,mrk_file,oxy_file,deoxy_file in zip(cnt_files,mrk_files,oxy_files,deoxy_files):
+    #得到session1和session1+session2的数据长度，为后面连接三个session做准备
+    cnt = io.loadmat(os.path.join(data_path,cnt_file))
+    cnt = cnt['cnt']
+    data1 = cnt[0, 0]['x'][0, 0]
+    data2 = cnt[0, 2]['x'][0, 0]
+    data3 = cnt[0, 4]['x'][0, 0]
+    shape = data1.shape
+    data1 = np.transpose(data1, (1, 0))
+    data2 = np.transpose(data2, (1, 0))
+    data3 = np.transpose(data3, (1, 0))
+    # print(data1.shape)  # 7192*72
+    t1 = data1.shape[1]; t2 = t1 + data2.shape[1]
+    # print(t1, t2)   # 7192,14392
+
+    #获得event数组
+    mrk = io.loadmat(os.path.join(data_path,mrk_file))
+    mrk_data = mrk['mrk']
+    time1 = mrk_data[0, 0]['time'];time2 = mrk_data[0, 2]['time'];time3 = mrk_data[0, 4]['time']
+    time2[0][0] = time2[0][0] + t1 * 100;time3[0][0] = time3[0][0] + t2 * 100
+    time = np.concatenate([time1[0][0], time2[0][0], time3[0][0]], axis=1)[0].tolist()
+    # print(time)
+    event1 = mrk_data[0, 0]['event'][0, 0]['desc'];event2 = mrk_data[0, 2]['event'][0, 0]['desc'];event3 = mrk_data[0, 4]['event'][0, 0]['desc']
+    event = np.concatenate([event1[0][0], event2[0][0], event3[0][0]], axis=0).tolist()
+    # print(event)
+    events = [[[] for i in range(3)] for i in range(60)]
+    for i in range(60):
+        events[i][0] = time[i] // 100
+        events[i][1] = 0
+        events[i][2] = event[i][0]
+    events = np.array(events)
+    #获得转换后的氧合、脱氧含量变化数据
+    oxy = io.loadmat(os.path.join(converteddata_path,oxy_file))
+    oxy = oxy['oxydata']
+    oxy = np.transpose(oxy, (1, 0))
+    # print(oxy.shape)
+    deoxy = io.loadmat(os.path.join(converteddata_path,deoxy_file))
+    deoxy = deoxy['deoxydata']
+    deoxy = np.transpose(deoxy, (1, 0))
+
+    ch_hbo_types = ["hbo"] * 36
+    oxyinfo = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types=ch_hbo_types)
+    rawoxy = mne.io.RawArray(oxy, oxyinfo)
+    rawoxyfilt = rawoxy.filter(0.01, 0.1, h_trans_bandwidth=0.1, l_trans_bandwidth=0.01)
+    # rawfilt.plot(n_channels=len(rawoxy.ch_names), duration=1000, show_scrollbars=False)
+
+    ch_hbr_types = ["hbr"] * 36
+    deoxyinfo = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types=ch_hbr_types)
+    rawdeoxy = mne.io.RawArray(deoxy, deoxyinfo)
+    rawdeoxyfilt = rawoxy.filter(0.01, 0.1, h_trans_bandwidth=0.1, l_trans_bandwidth=0.01)
+
+    event_id = dict(LMI=1, RMI=2)
+
+    oxyepochs = mne.Epochs(raw=rawoxyfilt, events=events, event_id=event_id, preload=True, proj=True,
+                        tmax=15, tmin=-2, baseline=(-2, 0))
+    oxydata = oxyepochs.get_data()  # [n_epochs, n_channels, n_times]
+    # print(data.shape)
+    oxydata = oxydata[:, :, 70:-1]  # (60,30,100)
+    # print(oxydata.shape)
+    # print(oxyepochs)
+    # oxyepochs.plot(scalings='auto')
+    # plt.show()
+
+    deoxyepochs = mne.Epochs(raw=rawdeoxyfilt, events=events, event_id=event_id, preload=True, proj=True,
+                        tmax=15, tmin=-2, baseline=(-2, 0))
+    deoxydata = deoxyepochs.get_data()  # [n_epochs, n_channels, n_times]
+    # print(deoxydata.shape)
+    deoxydata = deoxydata[:, :, 70:-1]  # (60,30,100)
+    # print(deoxydata.shape)
+    # print(deoxyepochs)
+
+    # true_labels = events[:, -1] // event_id['LMI']
+    # print(true_labels)
+
+    np.save(os.path.join(save_path, str(sub) + '_hbo.npy'), oxydata)
+    np.save(os.path.join(save_path, str(sub) + '_hbr.npy'), deoxydata)
+    # np.save(os.path.join(save_path, str(sub) + '_label.npy'), true_labels)
+    print('sub{} saved'.format(sub))
+
+    sub = sub + 1
