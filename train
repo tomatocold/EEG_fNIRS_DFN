@@ -9,6 +9,52 @@ from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 import time
 import torch.optim as optim
 
+
+class MultiInputDataset(Dataset):
+    def __init__(self, input1, input2, labels):
+        self.input1 = input1
+        self.input2 = input2
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        input1_sample = self.input1[idx]
+        input2_sample = self.input2[idx]
+        label = self.labels[idx]
+        return input1_sample, input2_sample, label
+
+
+def data_slidingwindow(data ,label ,datasize, type):
+    alldata = []
+    alllabel = []
+    if type == "eeg":
+        fs = 200
+    else:
+        fs = 10
+    for i in range(datasize):
+        for j in range(3):
+            data_segment = data[i, :, j*3 * fs :(j*3 + 3) * fs]
+            if i == 0 and j == 0:
+                alldata = data_segment[np.newaxis, :]
+            else:
+                data_segment = data_segment[np.newaxis, :]
+                alldata = np.vstack((alldata, data_segment))
+        if i == 0:
+            alllabel = [label[i], label[i], label[i]]
+        else:
+            labelnew = [label[i], label[i], label[i]]
+            alllabel = np.concatenate((alllabel, labelnew), axis=0)
+
+    return alldata, alllabel  # 返回数据和类标签
+
+def process(x):
+    mean = np.mean(x)
+    std = np.std(x)
+    x = (x - mean)/std
+    return x
+
 num_folds = 5
 batch_size = 32
 epoch_num = 100
