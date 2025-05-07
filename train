@@ -1,0 +1,160 @@
+from model_fusion import DDEF
+num_folds = 5
+batch_size = 32
+epoch_num = 100
+device = torch.device("cuda")
+criterion = nn.CrossEntropyLoss()
+criterion = criterion.to(device)
+milestones = [60, 90]
+results = {}
+result = []
+
+result_TP = []
+result_FP = []
+result_TN = []
+result_FN = []
+
+for id in range(1, 30):
+    label = np.load(os.path.join(r"D:\hbcidata-processed\fnirs_0_10_epoch", f"{id}" + '_label.npy'))
+    label = label - 1
+    X_hbo = np.load(os.path.join(r"D:\hbcidata-processed\fnirs_0_10_epoch", f"{id}" + '_oxydata.npy'))
+    X_hbr = np.load(os.path.join(r"D:\hbcidata-processed\fnirs_0_10_epoch", f"{id}" + '_deoxydata.npy'))
+    nirs_data = np.concatenate((X_hbo, X_hbr), axis=1)
+    normalized = np.zeros(nirs_data.shape)
+    for i in range(nirs_data.shape[0]):
+        for j in range(nirs_data.shape[2]):
+            normalized[i, :, j] = process(nirs_data[i, :, j])
+    data = normalized
+    x_nirs,label = data_slidingwindow(data,label,data.shape[0],type="nirs")
+    x_eeg = np.load(os.path.join(r"D:\hbcidata-processed\eeg_8_30filter", f"{id}" + '_data.npy'))
+    x_eeg, _ = data_slidingwindow(x_eeg,label,data.shape[0],type="eeg")
+    time_acc_mean = []
+    time_acc_std = []
+    start = time.time()
+    kFold_results = []
+    k_TP = []
+    k_FP = []
+    k_TN = []
+    k_FN = []
+    stratified_kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=42)
+    for fold, (train_indices, test_indices) in enumerate(stratified_kfold.split(x_nirs, label)):
+        # print(f"\nFold {fold + 1}:")
+        print("受试者 {} 第 {} 折".format(id, fold + 1))
+        # 获取当前折叠的训练集和测试集索引
+        x_train_nirs, x_test_nirs = x_nirs[train_indices], x_nirs[test_indices]
+        x_train_eeg, x_test_eeg = x_eeg[train_indices], x_eeg[test_indices]
+        y_train, y_test = label[train_indices], label[test_indices]
+
+        # pytorch tensor
+        train_data_tensor_nirs = torch.Tensor(x_train_nirs)
+        test_data_tensor_nirs = torch.Tensor(x_test_nirs)
+        train_data_tensor_eeg = torch.Tensor(x_train_eeg)
+        test_data_tensor_eeg = torch.Tensor(x_test_eeg)
+
+        train_labels_tensor = torch.Tensor(y_train).long()
+        test_labels_tensor = torch.Tensor(y_test).long()
+
+        # TensorDataset
+        train_dataset = MultiInputDataset(train_data_tensor_eeg, train_data_tensor_nirs, train_labels_tensor)
+        test_dataset = MultiInputDataset(test_data_tensor_eeg, test_data_tensor_nirs, test_labels_tensor)
+        #  DataLoader,加载数据集
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+        model = DDEF().to(device)
+#         optimizer = optim.SGD(model.parameters(), lr=0.075, weight_decay=0.001)
+        optimizer = optim.Adam(model.parameters(), lr=0.005, weight_decay=0.01)
+#         scheduler = LambdaLR(optimizer, lr_lambda)
+#         lrStep = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1, last_epoch=-1)
+        lrStep = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
+#         lrStep = optim.lr_scheduler.StepLR(optimizer, step_size = 20, gamma=0.1)
+        # 设置学习率调度器
+        # scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+        train_steps = 0
+        test_steps = 0
+        best_val_accuracy = 0
+
+        # writer = SummaryWriter("./logs_train")
+        for epoch in range(epoch_num):
+            # 开始训练
+            total_train_acc = 0
+            total_train_loss = 0
+            model.train()
+            for data in train_loader:
+                train_image_eeg, train_image_nirs, train_label = data
+                train_image_eeg, train_image_nirs, train_label = train_image_eeg.to(device), train_image_nirs.to(device), train_label.to(device)
+                train_image_eeg, train_image_nirs = train_image_eeg.unsqueeze(1), train_image_nirs.unsqueeze(1)
+                train_predictions = model(train_image_eeg, train_image_nirs)
+                train_loss = criterion(train_predictions, train_label).requires_grad_(True)
+                total_train_loss = total_train_loss + train_loss.item()
+#                 train_acc = ((train_predictions >= 0.5)==train_label).sum().item()
+                train_acc = (train_predictions.argmax(dim=1) == train_label).sum()
+                total_train_acc = total_train_acc + train_acc
+
+                # b = 0.1
+                # train_loss = (train_loss - b).abs() + b
+
+                # 优化器优化模型
+                optimizer.zero_grad()
+                train_loss.backward()
+                optimizer.step()
+                # 记录训练次数
+                train_steps += 1
+            if (epoch+1) % 10 ==0:
+                train_acc = total_train_acc/x_train_nirs.shape[0]
+                print('第 {} 轮，训练集准确率：{}   损失函数值{}'.format(epoch+1 ,train_acc,total_train_loss))
+                # writer.add_scalar("train loss_{}".format(fold), train_loss.item(), train_steps)
+#         scheduler.step()
+        lrStep.step()
+        # 测试：使用测试集最终测试模型准确率
+        model.eval()
+        total_test_accuracy = 0
+        total_TP = 0
+        total_FP = 0
+        total_TN = 0
+        total_FN = 0
+        with torch.no_grad():
+            for data in test_loader:
+                test_image_eeg, test_image_nirs, test_label = data
+                test_image_eeg, test_image_nirs, test_label = test_image_eeg.to(device), test_image_nirs.to(device), test_label.to(device)
+                test_image_eeg, test_image_nirs = test_image_eeg.unsqueeze(1), test_image_nirs.unsqueeze(1)
+                outputs = model(test_image_eeg, test_image_nirs)
+                test_acc = (outputs.argmax(dim=1) == test_label).sum()
+
+                 # 将预测结果转换为类别
+                predicted_labels = outputs.argmax(dim=1)
+                # 计算混淆矩阵中的四种结果
+                TP = ((predicted_labels == 1) & (test_label == 1)).sum()
+                TN = ((predicted_labels == 0) & (test_label == 0)).sum()
+                FP = ((predicted_labels == 1) & (test_label == 0)).sum()
+                FN = ((predicted_labels == 0) & (test_label == 1)).sum()
+
+                total_test_accuracy = total_test_accuracy + test_acc
+                total_TP = total_TP + TP
+                total_FP = total_FP + FP
+                total_TN = total_TN + TN
+                total_FN = total_FN + FN
+            accuracy = total_test_accuracy / x_test_nirs.shape[0]
+
+            acc_TP = total_TP / x_test_nirs.shape[0] * 2
+            acc_FP = total_FP / x_test_nirs.shape[0] * 2
+            acc_TN = total_TN / x_test_nirs.shape[0] * 2
+            acc_FN = total_FN / x_test_nirs.shape[0] * 2
+        print("受试者 {} 第{} 折 测试集准确率：{}".format(id, fold + 1, accuracy))
+        accuracy = accuracy.cpu()
+        acc_TP = acc_TP.cpu(); acc_FP = acc_FP.cpu(); acc_TN = acc_TN.cpu(); acc_FN = acc_FN.cpu();
+        kFold_results.append(accuracy)
+        k_TP.append(acc_TP);k_FP.append(acc_FP);k_TN.append(acc_TN);k_FN.append(acc_FN)
+        # writer.close()
+    print('5 Folds cost time: {}'.format(time.time() - start))
+    kFlod_results = np.array(kFold_results)
+    time_acc_mean.append(kFlod_results.mean())
+    time_acc_std.append(kFlod_results.std())
+    k_TP = np.array(k_TP); k_FP = np.array(k_FP); k_TN = np.array(k_TN); k_FN = np.array(k_FN);
+    result_TP.append(k_TP.mean()); result_FP.append(k_FP.mean()); result_TN.append(k_TN.mean()); result_FN.append(k_FN.mean());
+    print("受试者 {}  五折交叉验证准确率 {}±{}".format(id, time_acc_mean, time_acc_std))
+    print("受试者 {} 的混淆矩阵值 TP:{}, FP:{}, TN:{}, FN:{}".format(id, k_TP.mean(), k_FP.mean(), k_TN.mean(),k_FN.mean()))
+    result.append(time_acc_mean)
+    print(result)
+    print("所有受试的五折交叉验证的平均准确率{} ± {} ".format(np.mean(result,axis = 0),np.std(result,axis = 0)))
+    print("所有受试者的平均 TP:{}, FP:{}, TN:{}, FN:{}".format(np.mean(result_TP,axis=0),np.mean(result_FP,axis=0),np.mean(result_TN,axis=0),np.mean(result_FN,axis=0)))
